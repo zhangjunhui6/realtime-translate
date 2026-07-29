@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: realtime-translate
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /api/health
+    envVars:
+      - key: TRANSLATE_PROVIDER
+        value: mymemory
+      - key: RT_HOST
+        value: 0.0.0.0
+      # Render sets PORT automatically; server reads PORT when RT_PORT unset.

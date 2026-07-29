@@ -10,8 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "../..");
 dotenv.config({ path: path.join(rootDir, ".env") });
 
-// Prefer RT_* so ambient PORT/HOST (e.g. conda/devbox) cannot hijack bind address.
-const port = Number(process.env.RT_PORT || 8787);
+// Prefer RT_* for local/mlx. On Render/Fly, platform injects PORT.
+const port = Number(process.env.RT_PORT || process.env.PORT || 8787);
 const host = process.env.RT_HOST || "0.0.0.0";
 const hasKey = Boolean(process.env.OPENAI_API_KEY?.trim());
 const configured = (process.env.TRANSLATE_PROVIDER || "").toLowerCase();

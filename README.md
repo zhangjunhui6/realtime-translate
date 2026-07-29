@@ -24,14 +24,22 @@ npm run dev
 
 手机访问请用电脑局域网 IP，并尽量 **HTTPS**（或 Chrome 对 localhost 的例外）；麦克风/语音识别需要安全上下文。
 
-## 环境变量
+## 免费云部署（Render）
+
+1. 把本仓库推到 GitHub
+2. 打开 [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**，选本仓库（或 New Web Service + Docker）
+3. 使用仓库里的 `render.yaml` / `Dockerfile`
+4. 部署完成后得到 `https://xxx.onrender.com`（自动 HTTPS）
+
+说明：Free 实例闲置约 15 分钟会休眠，冷启动可能 30–60 秒。
 
 | 变量 | 说明 |
 |------|------|
 | `TRANSLATE_PROVIDER` | `mymemory`（默认免密）/ `openai` / `mock` |
 | `OPENAI_API_KEY` | 仅 openai 模式需要 |
-| `RT_PORT` | 后端端口，默认 `8787` |
-| `RT_HOST` | 监听地址，默认 `0.0.0.0` |
+| `RT_PORT` | 本地/mlx 端口；云上可省略，用平台 `PORT` |
+| `RT_HOST` | 监听地址，云上用 `0.0.0.0` |
+| `PORT` | Render/Fly 自动注入 |
 
 ## 验收对照
 
