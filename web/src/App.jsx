@@ -36,6 +36,14 @@ function speakBrowser(text, lang) {
   });
 }
 
+/** Split a turn into left(zh) / right(en) texts for same-orientation chat. */
+function bilingualPair(turn) {
+  if (turn.direction === "zh2en") {
+    return { zh: turn.sourceText, en: turn.translatedText };
+  }
+  return { zh: turn.translatedText, en: turn.sourceText };
+}
+
 export default function App() {
   const [health, setHealth] = useState(null);
   const [turns, setTurns] = useState([]);
@@ -48,8 +56,7 @@ export default function App() {
   const [draft, setDraft] = useState("");
 
   const recognitionRef = useRef(null);
-  const nearListRef = useRef(null);
-  const farListRef = useRef(null);
+  const listRef = useRef(null);
   const finalTranscriptRef = useRef("");
 
   const speechSupported = useMemo(
@@ -57,13 +64,13 @@ export default function App() {
     [],
   );
   const isIOS = useMemo(
-    () => /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    () =>
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
     [],
   );
 
   useEffect(() => {
-    // Ensure trailing slash so relative asset URLs resolve under /s/xxxx/
     const { pathname, search, hash } = window.location;
     if (pathname && !pathname.endsWith("/") && !pathname.split("/").pop().includes(".")) {
       window.history.replaceState(null, "", `${pathname}/${search}${hash}`);
@@ -86,17 +93,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    nearListRef.current?.scrollTo({
-      top: nearListRef.current.scrollHeight,
+    listRef.current?.scrollTo({
+      top: listRef.current.scrollHeight,
       behavior: "smooth",
     });
-    farListRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [turns, busy, recording, interim]);
 
-  useEffect(() => () => {
-    recognitionRef.current?.abort?.();
-    window.speechSynthesis?.cancel?.();
-  }, []);
+  useEffect(
+    () => () => {
+      recognitionRef.current?.abort?.();
+      window.speechSynthesis?.cancel?.();
+    },
+    [],
+  );
 
   const appendTurn = useCallback((turn) => {
     setTurns((prev) => [...prev, turn].slice(-MAX_TURNS));
@@ -243,38 +252,75 @@ export default function App() {
   const providerLabel = !health
     ? "检测中…"
     : health.provider === "mymemory"
-      ? "免密钥（翻译走 MyMemory）"
+      ? "免密钥（MyMemory）"
       : health.provider || "…";
 
   const phase = recording ? "listening" : busy ? "working" : "idle";
+  const latest = turns[turns.length - 1] || null;
 
   return (
     <div className={`app phase-${phase}`}>
-      <section className="pane pane-far" aria-label="对面一方">
-        <header className="pane-head">
-          <span className="lang-tag">EN</span>
-          <span className="hint">对面看这边 ↑</span>
-        </header>
-        <HistoryList
-          listRef={farListRef}
-          turns={turns}
-          side="en"
-          reverse
-          busy={busy}
-          onSpeak={playTts}
-          onCorrect={correctDirection}
-        />
-      </section>
-
-      <section className="control">
-        <div className="meta">
+      <header className="topbar">
+        <div>
           <strong>Realtime Translate</strong>
-          <span>中 ↔ 英 · 轮流对话</span>
-          <span className="provider">{providerLabel}</span>
+          <p>同侧观看 · 左中文 / 右英文</p>
         </div>
+        <span className="provider">{providerLabel}</span>
+      </header>
 
+      <div className="col-labels" aria-hidden="true">
+        <span>中文</span>
+        <span>English</span>
+      </div>
+
+      <main className="chat" ref={listRef}>
+        {!turns.length ? (
+          <div className="empty">
+            <p>还没有对话</p>
+            <p className="empty-sub">两人从同一侧看屏幕：左侧中文，右侧英文</p>
+          </div>
+        ) : (
+          turns.map((turn, index) => {
+            const { zh, en } = bilingualPair(turn);
+            const isLatest = index === turns.length - 1;
+            return (
+              <section key={turn.id} className={`turn-row ${isLatest ? "latest" : ""}`}>
+                <article className="bubble left">
+                  <span className="lang-tag">中</span>
+                  <p className="primary">{zh || "—"}</p>
+                  {zh ? (
+                    <button type="button" className="mini" disabled={busy} onClick={() => playTts(zh, "zh")}>
+                      播报
+                    </button>
+                  ) : null}
+                </article>
+                <article className="bubble right">
+                  <span className="lang-tag">EN</span>
+                  <p className="primary">{en || "—"}</p>
+                  {en ? (
+                    <button type="button" className="mini" disabled={busy} onClick={() => playTts(en, "en")}>
+                      Speak
+                    </button>
+                  ) : null}
+                </article>
+              </section>
+            );
+          })
+        )}
+      </main>
+
+      {latest ? (
+        <div className="latest-actions">
+          <button type="button" disabled={busy} onClick={() => correctDirection(latest)}>
+            纠正方向（{latest.direction}）
+          </button>
+          {latest.detected ? <span className="detect">已自动检测语种</span> : null}
+        </div>
+      ) : null}
+
+      <footer className={`composer ${phase}`}>
         {isIOS || !speechSupported ? (
-          <p className="ios-tip">iOS 网页无法可靠语音识别，请用下方打字；播报仍可用</p>
+          <p className="ios-tip">iOS 请用打字；播报仍可用系统语音</p>
         ) : null}
 
         <div className="compose">
@@ -291,7 +337,12 @@ export default function App() {
               }
             }}
           />
-          <button type="button" className="send" disabled={busy || recording || !draft.trim()} onClick={() => void submitDraft()}>
+          <button
+            type="button"
+            className="send"
+            disabled={busy || recording || !draft.trim()}
+            onClick={() => void submitDraft()}
+          >
             发送
           </button>
         </div>
@@ -305,9 +356,7 @@ export default function App() {
             aria-pressed={recording}
           >
             <span className="mic-pulse" aria-hidden="true" />
-            <span className="mic-label">
-              {recording ? "结束" : busy ? "处理中" : "说话"}
-            </span>
+            <span className="mic-label">{recording ? "结束" : busy ? "…" : "说话"}</span>
           </button>
         ) : null}
 
@@ -324,105 +373,17 @@ export default function App() {
           >
             下一句偏好：{langHint === "zh-CN" ? "中文" : "English"}
           </button>
-          <button type="button" className="ghost" onClick={clearHistory} disabled={!turns.length || busy || recording}>
+          <button
+            type="button"
+            className="ghost"
+            onClick={clearHistory}
+            disabled={!turns.length || busy || recording}
+          >
             清空
           </button>
           <span className="count">{turns.length} 轮</span>
         </div>
-      </section>
-
-      <section className="pane pane-near" aria-label="靠近一方">
-        <header className="pane-head">
-          <span className="lang-tag">中文</span>
-          <span className="hint">你看这边 ↓</span>
-        </header>
-        <HistoryList
-          listRef={nearListRef}
-          turns={turns}
-          side="zh"
-          busy={busy}
-          onSpeak={playTts}
-          onCorrect={correctDirection}
-        />
-      </section>
+      </footer>
     </div>
-  );
-}
-
-function HistoryList({
-  listRef,
-  turns,
-  side,
-  reverse = false,
-  busy,
-  onSpeak,
-  onCorrect,
-}) {
-  const items = reverse ? [...turns].reverse() : turns;
-
-  if (!turns.length) {
-    return (
-      <div className="empty">
-        <p>还没有对话</p>
-        <p className="empty-sub">中间输入框打字发送，或（非 iOS）点说话</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="history" ref={listRef}>
-      {items.map((turn, index) => {
-        const latest = reverse ? index === 0 : index === items.length - 1;
-        return (
-          <TurnCard
-            key={turn.id}
-            turn={turn}
-            side={side}
-            latest={latest}
-            busy={busy}
-            onSpeak={onSpeak}
-            onCorrect={onCorrect}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function TurnCard({ turn, side, latest, busy, onSpeak, onCorrect }) {
-  const isSource = turn.sourceLang === side;
-  const primary = isSource ? turn.sourceText : turn.translatedText;
-  const secondary = isSource ? turn.translatedText : turn.sourceText;
-  const primaryLang = side;
-  const secondaryLang = side === "zh" ? "en" : "zh";
-  const role = isSource ? "我说的" : "译给我的";
-
-  return (
-    <article className={`bubble ${isSource ? "mine" : "theirs"} ${latest ? "latest" : ""}`}>
-      <div className="bubble-top">
-        <span className="role">{role}</span>
-        <span className="dir">{turn.direction}</span>
-      </div>
-      <p className="primary">{primary}</p>
-      <p className="secondary">{secondary}</p>
-      {latest ? (
-        <div className="actions">
-          <button type="button" disabled={busy || !primary} onClick={() => onSpeak(primary, primaryLang)}>
-            播报
-          </button>
-          <button
-            type="button"
-            disabled={busy || !secondary}
-            onClick={() => onSpeak(secondary, secondaryLang)}
-          >
-            播报原文
-          </button>
-          <button type="button" disabled={busy} onClick={() => onCorrect(turn)}>
-            纠正方向
-          </button>
-        </div>
-      ) : null}
-      {latest && turn.detected ? <p className="detect">自动检测 · 不对就点纠正</p> : null}
-    </article>
   );
 }
