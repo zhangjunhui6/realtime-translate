@@ -1,6 +1,33 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const MAX_TURNS = 40;
+
+function getSpeechRecognition() {
+  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  return Ctor ? new Ctor() : null;
+}
+
+function speakBrowser(text, lang) {
+  return new Promise((resolve, reject) => {
+    if (!window.speechSynthesis) {
+      reject(new Error("当前浏览器不支持系统播报"));
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = lang === "en" ? "en-US" : "zh-CN";
+    const voices = window.speechSynthesis.getVoices();
+    const preferred = voices.find((v) =>
+      lang === "en"
+        ? /^en(-|_)/i.test(v.lang)
+        : /zh(-|_|$)|chinese|云|晓/i.test(`${v.lang} ${v.name}`),
+    );
+    if (preferred) utter.voice = preferred;
+    utter.onend = () => resolve();
+    utter.onerror = () => reject(new Error("播报失败"));
+    window.speechSynthesis.speak(utter);
+  });
+}
 
 export default function App() {
   const [health, setHealth] = useState(null);
@@ -9,18 +36,37 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("点「说话」开始 · 再说一次结束");
+  const [langHint, setLangHint] = useState("zh-CN");
+  const [interim, setInterim] = useState("");
 
+  const recognitionRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const nearListRef = useRef(null);
   const farListRef = useRef(null);
+  const finalTranscriptRef = useRef("");
+
+  const browserSpeech = health?.browserSpeech !== false;
+  const speechSupported = useMemo(
+    () => Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
+    [],
+  );
 
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
       .then(setHealth)
-      .catch(() => setHealth({ ok: false, mock: true }));
+      .catch(() =>
+        setHealth({
+          ok: false,
+          provider: "mymemory",
+          browserSpeech: true,
+          browserTts: true,
+        }),
+      );
+    // Chrome loads voices asynchronously
+    window.speechSynthesis?.addEventListener?.("voiceschanged", () => {});
   }, []);
 
   useEffect(() => {
@@ -28,24 +74,112 @@ export default function App() {
       top: nearListRef.current.scrollHeight,
       behavior: "smooth",
     });
-    // Far pane is rotated 180deg: scrollTop 0 is visually at the "bottom" for the other person
     farListRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }, [turns, busy, recording]);
+  }, [turns, busy, recording, interim]);
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   }, []);
 
-  useEffect(() => () => stopStream(), [stopStream]);
+  useEffect(() => () => {
+    stopStream();
+    recognitionRef.current?.abort?.();
+    window.speechSynthesis?.cancel?.();
+  }, [stopStream]);
 
   const appendTurn = useCallback((turn) => {
     setTurns((prev) => [...prev, turn].slice(-MAX_TURNS));
+    setLangHint(turn.direction === "zh2en" ? "en-US" : "zh-CN");
   }, []);
 
-  const startRecording = async () => {
+  const translateText = async (sourceText, forceDirection = null) => {
+    setBusy(true);
     setError("");
-    if (busy) return;
+    setStatus("翻译中…");
+    try {
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceText, forceDirection }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "翻译失败");
+      appendTurn({ id: crypto.randomUUID(), ...data });
+      setStatus("点「说话」开始 · 再说一次结束");
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "网络或服务异常");
+      setStatus("点「说话」开始 · 再说一次结束");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startBrowserListen = () => {
+    setError("");
+    if (!speechSupported) {
+      setError("当前浏览器不支持语音识别，请用手机 Chrome（推荐 Android）");
+      return;
+    }
+    const recognition = getSpeechRecognition();
+    if (!recognition) {
+      setError("无法启动语音识别");
+      return;
+    }
+    finalTranscriptRef.current = "";
+    setInterim("");
+    recognition.lang = langHint;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let interimText = "";
+      let finalText = finalTranscriptRef.current;
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const piece = event.results[i][0]?.transcript || "";
+        if (event.results[i].isFinal) finalText += piece;
+        else interimText += piece;
+      }
+      finalTranscriptRef.current = finalText;
+      setInterim(`${finalText}${interimText}`.trim());
+    };
+    recognition.onerror = (event) => {
+      if (event.error === "aborted" || event.error === "no-speech") return;
+      setError(`语音识别：${event.error}`);
+    };
+    recognition.onend = () => {
+      // If user stopped intentionally we handle in stopBrowserListen.
+    };
+    recognitionRef.current = recognition;
+    recognition.start();
+    setRecording(true);
+    setStatus(`正在聆听（${langHint}）…说完再点一次`);
+  };
+
+  const stopBrowserListen = async () => {
+    const recognition = recognitionRef.current;
+    setRecording(false);
+    if (recognition) {
+      try {
+        recognition.stop();
+      } catch {
+        /* ignore */
+      }
+      recognitionRef.current = null;
+    }
+    const text = (finalTranscriptRef.current || interim).trim();
+    setInterim("");
+    finalTranscriptRef.current = "";
+    if (!text) {
+      setError("没有听清，请靠近麦克风再说一次");
+      setStatus("点「说话」开始 · 再说一次结束");
+      return;
+    }
+    await translateText(text);
+  };
+
+  const startServerRecording = async () => {
+    setError("");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -72,49 +206,47 @@ export default function App() {
           setStatus("点「说话」开始 · 再说一次结束");
           return;
         }
-        await submitTurn(blob);
+        setBusy(true);
+        setStatus("识别与翻译中…");
+        try {
+          const form = new FormData();
+          form.append("audio", blob, "speech.webm");
+          const res = await fetch("/api/turn", { method: "POST", body: form });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.message || "翻译失败");
+          appendTurn({ id: crypto.randomUUID(), ...data });
+          setStatus("点「说话」开始 · 再说一次结束");
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "网络或服务异常");
+          setStatus("点「说话」开始 · 再说一次结束");
+        } finally {
+          setBusy(false);
+        }
       };
       mediaRecorderRef.current = recorder;
       recorder.start();
       setRecording(true);
       setStatus("正在聆听…说完再点一次");
-    } catch (err) {
-      console.error(err);
-      setError("无法使用麦克风（需 HTTPS 或 localhost，并允许权限）");
-      setStatus("点「说话」开始 · 再说一次结束");
+    } catch {
+      setError("无法使用麦克风（需 HTTPS 或 localhost）");
     }
   };
 
-  const stopRecording = () => {
+  const stopServerRecording = () => {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") recorder.stop();
     setRecording(false);
-    setStatus("识别与翻译中…");
   };
 
   const toggleRecord = () => {
-    if (recording) stopRecording();
-    else void startRecording();
-  };
-
-  const submitTurn = async (blob) => {
-    setBusy(true);
-    setError("");
-    try {
-      const form = new FormData();
-      form.append("audio", blob, "speech.webm");
-      const res = await fetch("/api/turn", { method: "POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || "翻译失败");
-      appendTurn({ id: crypto.randomUUID(), ...data });
-      setStatus("点「说话」开始 · 再说一次结束");
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : "网络或服务异常");
-      setStatus("点「说话」开始 · 再说一次结束");
-    } finally {
-      setBusy(false);
+    if (recording) {
+      if (browserSpeech) void stopBrowserListen();
+      else stopServerRecording();
+      return;
     }
+    if (busy) return;
+    if (browserSpeech) startBrowserListen();
+    else void startServerRecording();
   };
 
   const correctDirection = async (turn) => {
@@ -132,6 +264,7 @@ export default function App() {
       setTurns((prev) =>
         prev.map((t) => (t.id === turn.id ? { ...t, ...data, id: t.id } : t)),
       );
+      setLangHint(direction === "zh2en" ? "en-US" : "zh-CN");
     } catch (err) {
       setError(err instanceof Error ? err.message : "重译失败");
     } finally {
@@ -142,6 +275,10 @@ export default function App() {
   const playTts = async (text, lang) => {
     setError("");
     try {
+      if (health?.browserTts !== false) {
+        await speakBrowser(text, lang);
+        return;
+      }
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -165,13 +302,16 @@ export default function App() {
     if (busy || recording) return;
     setTurns([]);
     setError("");
+    setLangHint("zh-CN");
   };
 
   const providerLabel = !health
     ? "检测中…"
-    : health.mock
-      ? "mock（未配置密钥）"
-      : health.provider || "openai";
+    : health.provider === "mymemory"
+      ? "免密钥（浏览器语音 + MyMemory）"
+      : health.mock
+        ? "mock"
+        : health.provider || "openai";
 
   const phase = recording ? "listening" : busy ? "working" : "idle";
 
@@ -197,9 +337,7 @@ export default function App() {
         <div className="meta">
           <strong>Realtime Translate</strong>
           <span>中 ↔ 英 · 轮流对话</span>
-          <span className={`provider ${health?.mock ? "warn" : ""}`}>
-            {providerLabel}
-          </span>
+          <span className="provider">{providerLabel}</span>
         </div>
 
         <button
@@ -216,11 +354,23 @@ export default function App() {
         </button>
 
         <p className="status">{status}</p>
+        {interim ? <p className="interim">{interim}</p> : null}
         {error ? <p className="error">{error}</p> : null}
+        {browserSpeech && !speechSupported ? (
+          <p className="error">建议使用手机 Chrome；iOS Safari 对语音识别支持很差</p>
+        ) : null}
 
         <div className="toolbar">
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setLangHint((h) => (h === "zh-CN" ? "en-US" : "zh-CN"))}
+            disabled={recording || busy}
+          >
+            下一句识别：{langHint === "zh-CN" ? "中文" : "English"}
+          </button>
           <button type="button" className="ghost" onClick={clearHistory} disabled={!turns.length || busy || recording}>
-            清空历史
+            清空
           </button>
           <span className="count">{turns.length} 轮</span>
         </div>
@@ -259,7 +409,7 @@ function HistoryList({
     return (
       <div className="empty">
         <p>还没有对话</p>
-        <p className="empty-sub">中间按钮录音，说完再点一次</p>
+        <p className="empty-sub">中间按钮开始说，说完再点一次</p>
       </div>
     );
   }

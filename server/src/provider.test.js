@@ -1,6 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createProvider } from "./provider.js";
+import { createProvider, detectDirection } from "./provider.js";
+
+test("detectDirection prefers CJK as zh2en", () => {
+  assert.equal(detectDirection("你好世界 hello"), "zh2en");
+  assert.equal(detectDirection("Where is the station?"), "en2zh");
+  assert.equal(detectDirection("hi", "zh2en"), "zh2en");
+});
+
+test("mock translateText respects forceDirection", async () => {
+  const provider = createProvider({ name: "mock" });
+  const result = await provider.translateText({
+    sourceText: "你好",
+    forceDirection: "zh2en",
+  });
+  assert.equal(result.direction, "zh2en");
+  assert.match(result.translatedText, /EN/);
+});
 
 test("mock provider returns zh/en turn payload", async () => {
   const provider = createProvider({ name: "mock" });

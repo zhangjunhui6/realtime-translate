@@ -1,15 +1,51 @@
 /**
- * Translation providers: mock (no key) and openai (ASR + MT + TTS).
+ * Translation providers:
+ * - mymemory: free text MT (no key); browser does ASR/TTS
+ * - mock: offline stub
+ * - openai: cloud ASR + MT + TTS when OPENAI_API_KEY is set
  */
 
 export function createProvider({ name, apiKey, baseUrl }) {
   if (name === "mock") return new MockProvider();
+  if (name === "mymemory") return new MyMemoryProvider();
   if (name === "openai") return new OpenAIProvider({ apiKey, baseUrl });
   throw new Error(`Unknown provider: ${name}`);
 }
 
+export function detectDirection(text, forceDirection) {
+  if (forceDirection === "zh2en" || forceDirection === "en2zh") return forceDirection;
+  const sample = String(text || "");
+  const cjk = (sample.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (cjk > 0) return "zh2en";
+  const latin = (sample.match(/[A-Za-z]/g) || []).length;
+  return latin > 0 ? "en2zh" : "zh2en";
+}
+
+function pack(sourceText, direction, { detected, provider }) {
+  return {
+    sourceLang: direction === "zh2en" ? "zh" : "en",
+    targetLang: direction === "zh2en" ? "en" : "zh",
+    direction,
+    sourceText,
+    translatedText: "",
+    detected,
+    provider,
+  };
+}
+
 class MockProvider {
   name = "mock";
+
+  async translateText({ sourceText, forceDirection }) {
+    const direction = detectDirection(sourceText, forceDirection);
+    const base = pack(sourceText, direction, {
+      detected: !forceDirection,
+      provider: this.name,
+    });
+    base.translatedText =
+      direction === "zh2en" ? `[EN] ${sourceText}` : `[中文] ${sourceText}`;
+    return base;
+  }
 
   async transcribeAndTranslate({ forceDirection }) {
     const direction = forceDirection || (Math.random() > 0.5 ? "zh2en" : "en2zh");
@@ -36,25 +72,61 @@ class MockProvider {
   }
 
   async retranslate({ sourceText, direction }) {
-    const translatedText =
-      direction === "zh2en"
-        ? `[EN] ${sourceText}`
-        : `[中文] ${sourceText}`;
+    return this.translateText({ sourceText, forceDirection: direction });
+  }
+
+  async synthesize() {
+    const buffer = buildSilentWav(0.4);
+    return { buffer, contentType: "audio/wav" };
+  }
+}
+
+class MyMemoryProvider {
+  name = "mymemory";
+
+  async translateText({ sourceText, forceDirection }) {
+    const text = String(sourceText || "").trim();
+    if (!text) throw new Error("没有识别到有效文本");
+    const direction = detectDirection(text, forceDirection);
+    const langpair = direction === "zh2en" ? "zh-CN|en" : "en|zh-CN";
+    const url = new URL("https://api.mymemory.translated.net/get");
+    url.searchParams.set("q", text);
+    url.searchParams.set("langpair", langpair);
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`翻译服务失败 (${res.status})`);
+    }
+    const data = await res.json();
+    const translatedText = String(data?.responseData?.translatedText || "").trim();
+    if (!translatedText) {
+      throw new Error("翻译结果为空，请重试");
+    }
+    // MyMemory returns THE EQUIVALENT OF when quota exceeded
+    if (/^\*?MYMEMORY WARNING/i.test(translatedText)) {
+      throw new Error("免密翻译额度用尽，请稍后再试或改用 OpenAI");
+    }
     return {
       sourceLang: direction === "zh2en" ? "zh" : "en",
       targetLang: direction === "zh2en" ? "en" : "zh",
       direction,
-      sourceText,
+      sourceText: text,
       translatedText,
-      detected: false,
+      detected: !forceDirection,
       provider: this.name,
     };
   }
 
-  async synthesize({ text }) {
-    // Minimal valid silent-ish WAV header + tiny payload so <audio> can load.
-    const buffer = buildSilentWav(0.4);
-    return { buffer, contentType: "audio/wav" };
+  async transcribeAndTranslate() {
+    throw new Error("mymemory 模式请在浏览器里语音识别，再调用 /api/translate");
+  }
+
+  async retranslate({ sourceText, direction }) {
+    return this.translateText({ sourceText, forceDirection: direction });
+  }
+
+  async synthesize() {
+    throw new Error("mymemory 模式请使用系统语音播报");
   }
 }
 
@@ -67,16 +139,20 @@ class OpenAIProvider {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
+  async translateText({ sourceText, forceDirection }) {
+    return this.translateViaChat(sourceText, forceDirection);
+  }
+
   async transcribeAndTranslate({ audioBuffer, mimeType, fileName, forceDirection }) {
     const sourceText = await this.transcribe(audioBuffer, mimeType, fileName);
     if (!sourceText.trim()) {
       throw new Error("没有识别到有效语音，请重试");
     }
-    return this.translateText(sourceText, forceDirection);
+    return this.translateViaChat(sourceText, forceDirection);
   }
 
   async retranslate({ sourceText, direction }) {
-    return this.translateText(sourceText, direction);
+    return this.translateViaChat(sourceText, direction);
   }
 
   async transcribe(audioBuffer, mimeType, fileName) {
@@ -91,7 +167,6 @@ class OpenAIProvider {
       body: form,
     });
     if (!res.ok) {
-      // Fallback for accounts that only have whisper-1
       if (res.status === 404 || res.status === 400) {
         return this.transcribeWhisper(audioBuffer, mimeType, fileName);
       }
@@ -120,7 +195,7 @@ class OpenAIProvider {
     return String(data.text || "").trim();
   }
 
-  async translateText(sourceText, forceDirection) {
+  async translateViaChat(sourceText, forceDirection) {
     const system = `You are a bilingual conversation translator for Mandarin Chinese and English.
 Return ONLY compact JSON with keys: sourceLang ("zh"|"en"), targetLang ("zh"|"en"), direction ("zh2en"|"en2zh"), sourceText, translatedText.
 Rules:
@@ -187,7 +262,6 @@ Rules:
       }),
     });
     if (!res.ok) {
-      // Older TTS model fallback
       const fallback = await fetch(`${this.baseUrl}/audio/speech`, {
         method: "POST",
         headers: {

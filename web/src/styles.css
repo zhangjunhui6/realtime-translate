@@ -258,6 +258,15 @@ body,
   text-align: center;
 }
 
+.interim {
+  margin: 0;
+  max-width: 22rem;
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-align: center;
+  line-height: 1.35;
+}
+
 .error {
   margin: 0;
   color: #fecaca;
