@@ -2,6 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const MAX_TURNS = 40;
 
+/** Prefix API paths for reverse-proxied short links like /s/xxxx/ */
+function apiUrl(path) {
+  const clean = String(path).replace(/^\//, "");
+  const base = `${window.location.pathname.replace(/\/index\.html$/, "").replace(/\/$/, "")}/`;
+  return `${base}${clean}`;
+}
+
 function getSpeechRecognition() {
   const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
   return Ctor ? new Ctor() : null;
@@ -35,26 +42,36 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [status, setStatus] = useState("点「说话」开始 · 再说一次结束");
+  const [status, setStatus] = useState("可打字发送；支持语音的浏览器可点「说话」");
   const [langHint, setLangHint] = useState("zh-CN");
   const [interim, setInterim] = useState("");
+  const [draft, setDraft] = useState("");
 
   const recognitionRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]);
-  const streamRef = useRef(null);
   const nearListRef = useRef(null);
   const farListRef = useRef(null);
   const finalTranscriptRef = useRef("");
 
-  const browserSpeech = health?.browserSpeech !== false;
   const speechSupported = useMemo(
     () => Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
     [],
   );
+  const isIOS = useMemo(
+    () => /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
+    [],
+  );
 
   useEffect(() => {
-    fetch("/api/health")
+    // Ensure trailing slash so relative asset URLs resolve under /s/xxxx/
+    const { pathname, search, hash } = window.location;
+    if (pathname && !pathname.endsWith("/") && !pathname.split("/").pop().includes(".")) {
+      window.history.replaceState(null, "", `${pathname}/${search}${hash}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch(apiUrl("api/health"))
       .then((r) => r.json())
       .then(setHealth)
       .catch(() =>
@@ -65,7 +82,6 @@ export default function App() {
           browserTts: true,
         }),
       );
-    // Chrome loads voices asynchronously
     window.speechSynthesis?.addEventListener?.("voiceschanged", () => {});
   }, []);
 
@@ -77,16 +93,10 @@ export default function App() {
     farListRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [turns, busy, recording, interim]);
 
-  const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-  }, []);
-
   useEffect(() => () => {
-    stopStream();
     recognitionRef.current?.abort?.();
     window.speechSynthesis?.cancel?.();
-  }, [stopStream]);
+  }, []);
 
   const appendTurn = useCallback((turn) => {
     setTurns((prev) => [...prev, turn].slice(-MAX_TURNS));
@@ -98,7 +108,7 @@ export default function App() {
     setError("");
     setStatus("翻译中…");
     try {
-      const res = await fetch("/api/translate", {
+      const res = await fetch(apiUrl("api/translate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceText, forceDirection }),
@@ -106,20 +116,27 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "翻译失败");
       appendTurn({ id: crypto.randomUUID(), ...data });
-      setStatus("点「说话」开始 · 再说一次结束");
+      setStatus(speechSupported ? "可继续说话或打字" : "继续打字发送（iOS 建议打字）");
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : "网络或服务异常");
-      setStatus("点「说话」开始 · 再说一次结束");
+      setStatus("可打字发送；支持语音的浏览器可点「说话」");
     } finally {
       setBusy(false);
     }
   };
 
+  const submitDraft = async () => {
+    const text = draft.trim();
+    if (!text || busy || recording) return;
+    setDraft("");
+    await translateText(text);
+  };
+
   const startBrowserListen = () => {
     setError("");
     if (!speechSupported) {
-      setError("当前浏览器不支持语音识别，请用手机 Chrome（推荐 Android）");
+      setError("当前浏览器不支持语音识别（iOS 请用下方打字）");
       return;
     }
     const recognition = getSpeechRecognition();
@@ -147,9 +164,6 @@ export default function App() {
       if (event.error === "aborted" || event.error === "no-speech") return;
       setError(`语音识别：${event.error}`);
     };
-    recognition.onend = () => {
-      // If user stopped intentionally we handle in stopBrowserListen.
-    };
     recognitionRef.current = recognition;
     recognition.start();
     setRecording(true);
@@ -171,82 +185,20 @@ export default function App() {
     setInterim("");
     finalTranscriptRef.current = "";
     if (!text) {
-      setError("没有听清，请靠近麦克风再说一次");
-      setStatus("点「说话」开始 · 再说一次结束");
+      setError("没有听清，请靠近麦克风再说一次，或改用打字");
+      setStatus("可打字发送；支持语音的浏览器可点「说话」");
       return;
     }
     await translateText(text);
   };
 
-  const startServerRecording = async () => {
-    setError("");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/webm")
-          ? "audio/webm"
-          : "";
-      const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
-      chunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-      recorder.onstop = async () => {
-        stopStream();
-        const blob = new Blob(chunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
-        });
-        chunksRef.current = [];
-        if (blob.size < 256) {
-          setError("录音太短，请再说长一点");
-          setStatus("点「说话」开始 · 再说一次结束");
-          return;
-        }
-        setBusy(true);
-        setStatus("识别与翻译中…");
-        try {
-          const form = new FormData();
-          form.append("audio", blob, "speech.webm");
-          const res = await fetch("/api/turn", { method: "POST", body: form });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.message || "翻译失败");
-          appendTurn({ id: crypto.randomUUID(), ...data });
-          setStatus("点「说话」开始 · 再说一次结束");
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "网络或服务异常");
-          setStatus("点「说话」开始 · 再说一次结束");
-        } finally {
-          setBusy(false);
-        }
-      };
-      mediaRecorderRef.current = recorder;
-      recorder.start();
-      setRecording(true);
-      setStatus("正在聆听…说完再点一次");
-    } catch {
-      setError("无法使用麦克风（需 HTTPS 或 localhost）");
-    }
-  };
-
-  const stopServerRecording = () => {
-    const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") recorder.stop();
-    setRecording(false);
-  };
-
   const toggleRecord = () => {
     if (recording) {
-      if (browserSpeech) void stopBrowserListen();
-      else stopServerRecording();
+      void stopBrowserListen();
       return;
     }
     if (busy) return;
-    if (browserSpeech) startBrowserListen();
-    else void startServerRecording();
+    startBrowserListen();
   };
 
   const correctDirection = async (turn) => {
@@ -254,7 +206,7 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch("/api/retranslate", {
+      const res = await fetch(apiUrl("api/retranslate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceText: turn.sourceText, direction }),
@@ -275,24 +227,7 @@ export default function App() {
   const playTts = async (text, lang) => {
     setError("");
     try {
-      if (health?.browserTts !== false) {
-        await speakBrowser(text, lang);
-        return;
-      }
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, lang }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.message || "播报失败");
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      await audio.play();
-      audio.onended = () => URL.revokeObjectURL(url);
+      await speakBrowser(text, lang);
     } catch (err) {
       setError(err instanceof Error ? err.message : "播报失败");
     }
@@ -308,10 +243,8 @@ export default function App() {
   const providerLabel = !health
     ? "检测中…"
     : health.provider === "mymemory"
-      ? "免密钥（浏览器语音 + MyMemory）"
-      : health.mock
-        ? "mock"
-        : health.provider || "openai";
+      ? "免密钥（翻译走 MyMemory）"
+      : health.provider || "…";
 
   const phase = recording ? "listening" : busy ? "working" : "idle";
 
@@ -340,25 +273,47 @@ export default function App() {
           <span className="provider">{providerLabel}</span>
         </div>
 
-        <button
-          type="button"
-          className={`mic ${recording ? "hot" : ""} ${busy ? "busy" : ""}`}
-          onClick={toggleRecord}
-          disabled={busy && !recording}
-          aria-pressed={recording}
-        >
-          <span className="mic-pulse" aria-hidden="true" />
-          <span className="mic-label">
-            {recording ? "结束" : busy ? "处理中" : "说话"}
-          </span>
-        </button>
+        {isIOS || !speechSupported ? (
+          <p className="ios-tip">iOS 网页无法可靠语音识别，请用下方打字；播报仍可用</p>
+        ) : null}
+
+        <div className="compose">
+          <input
+            type="text"
+            value={draft}
+            placeholder={langHint === "zh-CN" ? "输入中文或英文…" : "Type Chinese or English…"}
+            disabled={busy || recording}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submitDraft();
+              }
+            }}
+          />
+          <button type="button" className="send" disabled={busy || recording || !draft.trim()} onClick={() => void submitDraft()}>
+            发送
+          </button>
+        </div>
+
+        {speechSupported ? (
+          <button
+            type="button"
+            className={`mic ${recording ? "hot" : ""} ${busy ? "busy" : ""}`}
+            onClick={toggleRecord}
+            disabled={busy && !recording}
+            aria-pressed={recording}
+          >
+            <span className="mic-pulse" aria-hidden="true" />
+            <span className="mic-label">
+              {recording ? "结束" : busy ? "处理中" : "说话"}
+            </span>
+          </button>
+        ) : null}
 
         <p className="status">{status}</p>
         {interim ? <p className="interim">{interim}</p> : null}
         {error ? <p className="error">{error}</p> : null}
-        {browserSpeech && !speechSupported ? (
-          <p className="error">建议使用手机 Chrome；iOS Safari 对语音识别支持很差</p>
-        ) : null}
 
         <div className="toolbar">
           <button
@@ -367,7 +322,7 @@ export default function App() {
             onClick={() => setLangHint((h) => (h === "zh-CN" ? "en-US" : "zh-CN"))}
             disabled={recording || busy}
           >
-            下一句识别：{langHint === "zh-CN" ? "中文" : "English"}
+            下一句偏好：{langHint === "zh-CN" ? "中文" : "English"}
           </button>
           <button type="button" className="ghost" onClick={clearHistory} disabled={!turns.length || busy || recording}>
             清空
@@ -409,7 +364,7 @@ function HistoryList({
     return (
       <div className="empty">
         <p>还没有对话</p>
-        <p className="empty-sub">中间按钮开始说，说完再点一次</p>
+        <p className="empty-sub">中间输入框打字发送，或（非 iOS）点说话</p>
       </div>
     );
   }
