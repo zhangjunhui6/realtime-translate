@@ -52,6 +52,7 @@ export default function App() {
   const [interim, setInterim] = useState("");
   const [draft, setDraft] = useState("");
   const [autoSpeak, setAutoSpeak] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const recognitionRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -422,114 +423,144 @@ export default function App() {
   const phase = recording ? "listening" : busy ? "working" : "idle";
   const latest = turns[turns.length - 1] || null;
   const micHint = cloudAsr
-    ? "点麦克风说话：云端识别 + 自动互译；也可打字"
+    ? "点下方说话，或上方打字"
     : isIOS || !speechSupported
-      ? "本地方案：iPhone 请打字（网页语音识别弱）；Android 可说话"
-      : "本地方案：可打字或点麦克风（浏览器识别）";
+      ? "iPhone 建议打字；Android 可说话"
+      : "点下方说话，或上方打字";
 
   return (
     <div className={`shell phase-${phase}`}>
       <div className="atmosphere" aria-hidden="true" />
 
       <header className="top">
-        <div className="pair-switch" aria-label="语言对">
-          <span className="lang">中文</span>
-          <span className="auto-badge">AUTO</span>
-          <span className="lang en">English</span>
+        <div className="brand-block">
+          <p className="brand">对面 · FaceTalk</p>
+          <div className="pair-switch" aria-label="语言对">
+            <span className="lang">中</span>
+            <span className="auto-badge">AUTO</span>
+            <span className="lang en">EN</span>
+          </div>
         </div>
         <div className="top-right">
-          <span className="pill">{providerLabel}</span>
           <button
             type="button"
             className={`pill toggle ${autoSpeak ? "on" : ""}`}
             onClick={() => setAutoSpeak((v) => !v)}
           >
-            {autoSpeak ? "自动播报开" : "自动播报关"}
+            {autoSpeak ? "播报开" : "播报关"}
+          </button>
+          <button
+            type="button"
+            className={`pill settings-btn ${settingsOpen ? "on" : ""}`}
+            aria-expanded={settingsOpen}
+            onClick={() => setSettingsOpen((v) => !v)}
+          >
+            设置
           </button>
         </div>
       </header>
 
-      {providers.length ? (
-        <div className="provider-row" aria-label="翻译方案">
-          {providers.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className={`provider-chip ${p.active ? "active" : ""} ${p.ready ? "" : "disabled"}`}
-              disabled={!p.ready || busy || recording}
-              title={p.hint || p.label}
-              onClick={() => void switchProvider(p.id)}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+      {settingsOpen ? (
+        <section className="settings-panel" aria-label="设置">
+          <div className="settings-row">
+            <span className="settings-label">当前方案</span>
+            <span className="pill">{providerLabel}</span>
+          </div>
+          {providers.length ? (
+            <div className="provider-row" aria-label="翻译方案">
+              {providers.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`provider-chip ${p.active ? "active" : ""} ${p.ready ? "" : "disabled"}`}
+                  disabled={!p.ready || busy || recording}
+                  title={p.hint || p.label}
+                  onClick={() => void switchProvider(p.id)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {latest ? (
+            <div className="tools">
+              <button type="button" disabled={busy} onClick={() => correctDirection(latest)}>
+                纠正方向
+              </button>
+              <button type="button" className="ghost" disabled={busy || recording} onClick={clearHistory}>
+                清空
+              </button>
+            </div>
+          ) : null}
+        </section>
       ) : null}
 
-      <p className="lede">
-        可切换：本地最快 / 有道 / 讯飞。同侧阅读，左中文右英文。
-      </p>
-
       <main className="transcript" ref={listRef}>
-        {!turns.length ? (
+        {!turns.length && !interim && !recording && !busy ? (
           <div className="empty">
-            <h1>开始自动对话</h1>
-            <p>像 Google 翻译对话一样：一人一句，系统自动判语种并互译。</p>
-            <ul>
-              <li>输入或说话（iPhone 请打字）</li>
-              <li>自动中 ↔ 英</li>
-              <li>译文可自动朗读</li>
-            </ul>
+            <p className="empty-brand">对面 · FaceTalk</p>
+            <h1>一人一句，自动互译</h1>
+            <p>中文左 · 英文右</p>
           </div>
         ) : (
-          turns.map((turn, index) => {
-            const { zh, en, spoken } = bilingualPair(turn);
-            const isLatest = index === turns.length - 1;
-            return (
-              <article key={turn.id} className={`card ${isLatest ? "latest" : ""}`}>
-                <div className="card-meta">
-                  <span>#{index + 1}</span>
-                  <span>{spoken === "zh" ? "中文原文 → 英文" : "English → 中文"}</span>
-                </div>
-                <div className="duo">
-                  <div className={`bubble zh ${spoken === "zh" ? "source" : ""}`}>
-                    <span className="label">中文</span>
-                    <p>{zh || "—"}</p>
-                    {zh ? (
-                      <button type="button" disabled={busy} onClick={() => playTts(zh, "zh")}>
-                        播报
-                      </button>
-                    ) : null}
+          <>
+            {turns.map((turn, index) => {
+              const { zh, en, spoken } = bilingualPair(turn);
+              const isLatest = index === turns.length - 1;
+              return (
+                <article
+                  key={turn.id}
+                  className={`turn ${isLatest ? "latest" : ""} ${spoken === "zh" ? "from-zh" : "from-en"}`}
+                >
+                  <div className={`msg-row left ${spoken === "zh" ? "source" : "translated"}`}>
+                    <div className={`bubble zh ${spoken === "zh" ? "source" : ""}`}>
+                      <p>{zh || "—"}</p>
+                      {zh ? (
+                        <button type="button" disabled={busy} onClick={() => playTts(zh, "zh")}>
+                          播报
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className={`bubble en ${spoken === "en" ? "source" : ""}`}>
-                    <span className="label">English</span>
-                    <p>{en || "—"}</p>
-                    {en ? (
-                      <button type="button" disabled={busy} onClick={() => playTts(en, "en")}>
-                        Speak
-                      </button>
-                    ) : null}
+                  <div className={`msg-row right ${spoken === "en" ? "source" : "translated"}`}>
+                    <div className={`bubble en ${spoken === "en" ? "source" : ""}`}>
+                      <p>{en || "—"}</p>
+                      {en ? (
+                        <button type="button" disabled={busy} onClick={() => playTts(en, "en")}>
+                          Speak
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
+                </article>
+              );
+            })}
+            {interim ? (
+              <div className="msg-row left live">
+                <div className="bubble zh live">
+                  <span className="live-tag">识别中</span>
+                  <p>{interim}</p>
                 </div>
-              </article>
-            );
-          })
+              </div>
+            ) : null}
+            {recording && !interim ? (
+              <div className="msg-row center">
+                <div className="listening-pill">
+                  <span className="wave" aria-hidden="true" />
+                  正在听…
+                </div>
+              </div>
+            ) : null}
+            {busy && !interim && !recording ? (
+              <div className="msg-row center">
+                <div className="typing-pill">互译中…</div>
+              </div>
+            ) : null}
+          </>
         )}
       </main>
 
-      {latest ? (
-        <div className="tools">
-          <button type="button" disabled={busy} onClick={() => correctDirection(latest)}>
-            翻反了？纠正方向
-          </button>
-          <button type="button" className="ghost" disabled={busy || recording} onClick={clearHistory}>
-            清空对话
-          </button>
-        </div>
-      ) : null}
-
       <footer className="dock">
-        <p className="hint">{micHint}</p>
         <div className="compose">
           <input
             ref={inputRef}
@@ -544,22 +575,34 @@ export default function App() {
               }
             }}
           />
-          <button type="button" className="send" disabled={busy || recording || !draft.trim()} onClick={() => void submitDraft()}>
+          <button
+            type="button"
+            className="send"
+            disabled={busy || recording || !draft.trim()}
+            onClick={() => void submitDraft()}
+          >
             发送
           </button>
-          {canRecord ? (
+        </div>
+
+        {canRecord ? (
+          <div className="mic-wrap">
             <button
               type="button"
               className={`mic ${recording ? "hot" : ""}`}
               disabled={busy && !recording}
               onClick={toggleRecord}
+              aria-label={recording ? "结束说话" : "开始说话"}
             >
-              {recording ? "结束" : "说话"}
+              <span className="mic-core">{recording ? "结束" : "说话"}</span>
             </button>
-          ) : null}
-        </div>
+            <p className="mic-hint">{recording ? "说完点结束" : micHint}</p>
+          </div>
+        ) : (
+          <p className="mic-hint">{micHint}</p>
+        )}
+
         <p className="status">{status}</p>
-        {interim ? <p className="interim">{interim}</p> : null}
         {error ? <p className="error">{error}</p> : null}
       </footer>
     </div>
