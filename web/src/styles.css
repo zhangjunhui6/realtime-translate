@@ -35,7 +35,7 @@ button, input { font: inherit; }
   min-height: 100%;
   min-height: 100dvh;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
   gap: 0.55rem;
   padding: 0.8rem 0.85rem calc(0.85rem + env(safe-area-inset-bottom));
   overflow: hidden;
@@ -85,6 +85,36 @@ button, input { font: inherit; }
   gap: 0.35rem;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.provider-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.provider-chip {
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.provider-chip.active {
+  color: var(--text);
+  border-color: rgba(122, 162, 255, 0.55);
+  background: rgba(122, 162, 255, 0.18);
+}
+
+.provider-chip.disabled {
+  opacity: 0.45;
+}
+
+.provider-chip:disabled {
+  cursor: not-allowed;
 }
 
 .pill {

@@ -6,8 +6,26 @@ services:
     region: singapore
     healthCheckPath: /api/health
     envVars:
-      - key: TRANSLATE_PROVIDER
-        value: mymemory
       - key: RT_HOST
         value: 0.0.0.0
-      # Render sets PORT automatically; server reads PORT when RT_PORT unset.
+      # Default: local free MT. Set YOUDAO_* secrets in Render dashboard to enable 有道.
+      - key: TRANSLATE_PROVIDER
+        value: local
+      - key: YOUDAO_APP_KEY
+        sync: false
+      - key: YOUDAO_APP_SECRET
+        sync: false
+      - key: XUNFEI_APP_ID
+        sync: false
+      - key: XUNFEI_API_KEY
+        sync: false
+      - key: XUNFEI_API_SECRET
+        sync: false
+      - key: VOLC_ARK_API_KEY
+        sync: false
+      - key: VOLC_ARK_MODEL
+        sync: false
+      - key: VOLC_ACCESS_KEY
+        sync: false
+      - key: VOLC_SECRET_KEY
+        sync: false

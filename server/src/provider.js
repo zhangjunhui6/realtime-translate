@@ -1,26 +1,58 @@
 /**
  * Translation providers:
- * - googlegtx: free unofficial Google translate endpoint (best free quality)
- * - mymemory: free text MT fallback (quality uneven on Chinese)
+ * - googlegtx / local: free unofficial Google translate endpoint
+ * - mymemory: free text MT fallback
+ * - youdao: Youdao Zhiyun text MT + short ASR
+ * - xunfei: iFlytek MT + IAT ASR
  * - mock: offline stub
  * - openai: cloud ASR + MT + TTS when OPENAI_API_KEY is set
  */
 
-export function createProvider({ name, apiKey, baseUrl }) {
+import { createHash, randomUUID } from "node:crypto";
+import { convertToWav16kMono, detectDirection } from "./audio-util.js";
+import { XunfeiProvider } from "./xunfei.js";
+import { VolcanoArkProvider } from "./volcano.js";
+
+export { detectDirection } from "./audio-util.js";
+
+export function createProvider({
+  name,
+  apiKey,
+  baseUrl,
+  youdaoAppKey,
+  youdaoAppSecret,
+  xunfeiAppId,
+  xunfeiApiKey,
+  xunfeiApiSecret,
+  volcanoArkApiKey,
+  volcanoArkModel,
+  volcanoArkBaseUrl,
+}) {
   if (name === "mock") return new MockProvider();
   if (name === "googlegtx") return new GoogleGtxProvider();
   if (name === "mymemory") return new MyMemoryProvider();
+  if (name === "youdao") {
+    return new YoudaoProvider({
+      appKey: youdaoAppKey,
+      appSecret: youdaoAppSecret,
+    });
+  }
+  if (name === "xunfei") {
+    return new XunfeiProvider({
+      appId: xunfeiAppId,
+      apiKey: xunfeiApiKey,
+      apiSecret: xunfeiApiSecret,
+    });
+  }
+  if (name === "volcano") {
+    return new VolcanoArkProvider({
+      apiKey: volcanoArkApiKey,
+      model: volcanoArkModel,
+      baseUrl: volcanoArkBaseUrl,
+    });
+  }
   if (name === "openai") return new OpenAIProvider({ apiKey, baseUrl });
   throw new Error(`Unknown provider: ${name}`);
-}
-
-export function detectDirection(text, forceDirection) {
-  if (forceDirection === "zh2en" || forceDirection === "en2zh") return forceDirection;
-  const sample = String(text || "");
-  const cjk = (sample.match(/[\u4e00-\u9fff]/g) || []).length;
-  if (cjk > 0) return "zh2en";
-  const latin = (sample.match(/[A-Za-z]/g) || []).length;
-  return latin > 0 ? "en2zh" : "zh2en";
 }
 
 function pack(sourceText, direction, { detected, provider }) {
@@ -134,6 +166,182 @@ class GoogleGtxProvider {
   async synthesize() {
     throw new Error("googlegtx 模式请使用系统语音播报");
   }
+}
+
+class YoudaoProvider {
+  name = "youdao";
+
+  constructor({ appKey, appSecret }) {
+    if (!appKey?.trim() || !appSecret?.trim()) {
+      throw new Error("YOUDAO_APP_KEY and YOUDAO_APP_SECRET are required");
+    }
+    this.appKey = appKey.trim();
+    this.appSecret = appSecret.trim();
+  }
+
+  async translateText({ sourceText, forceDirection }) {
+    const text = String(sourceText || "").trim();
+    if (!text) throw new Error("没有识别到有效文本");
+    const direction = detectDirection(text, forceDirection);
+    const from = direction === "zh2en" ? "zh-CHS" : "en";
+    const to = direction === "zh2en" ? "en" : "zh-CHS";
+    const data = await this.postForm("https://openapi.youdao.com/api", {
+      q: text,
+      from,
+      to,
+      strict: "true",
+    });
+    if (String(data.errorCode) !== "0") {
+      throw new Error(youdaoErrorMessage("MT", data.errorCode));
+    }
+    const translatedText = String(data.translation?.[0] || "").trim();
+    if (!translatedText) throw new Error("翻译结果为空，请重试");
+    return {
+      sourceLang: direction === "zh2en" ? "zh" : "en",
+      targetLang: direction === "zh2en" ? "en" : "zh",
+      direction,
+      sourceText: text,
+      translatedText,
+      detected: !forceDirection,
+      provider: this.name,
+    };
+  }
+
+  async transcribeAndTranslate({ audioBuffer, mimeType, forceDirection }) {
+    const t0 = Date.now();
+    const sourceText = await this.transcribe(audioBuffer, mimeType, forceDirection);
+    const asrMs = Date.now() - t0;
+    if (!sourceText.trim()) {
+      throw new Error("没有识别到有效语音，请重试");
+    }
+    const t1 = Date.now();
+    const result = await this.translateText({ sourceText, forceDirection });
+    result.timings = { asrMs, mtMs: Date.now() - t1, totalMs: Date.now() - t0 };
+    return result;
+  }
+
+  async retranslate({ sourceText, direction }) {
+    return this.translateText({ sourceText, forceDirection: direction });
+  }
+
+  async synthesize() {
+    throw new Error("youdao 模式请使用系统语音播报");
+  }
+
+  async transcribe(audioBuffer, mimeType, forceDirection) {
+    const wav = await convertToWav16kMono(audioBuffer, mimeType);
+    const q = wav.toString("base64");
+    if (forceDirection === "zh2en") {
+      return this.recognizeOnce(q, "zh-CHS");
+    }
+    if (forceDirection === "en2zh") {
+      return this.recognizeOnce(q, "en");
+    }
+    // Auto: run zh/en ASR in parallel, pick the script-matching transcript.
+    const [zhRes, enRes] = await Promise.allSettled([
+      this.recognizeOnce(q, "zh-CHS"),
+      this.recognizeOnce(q, "en"),
+    ]);
+    const zh = zhRes.status === "fulfilled" ? zhRes.value : "";
+    const en = enRes.status === "fulfilled" ? enRes.value : "";
+    const picked = pickAsrTranscript(zh, en);
+    if (picked) return picked;
+    if (zhRes.status === "rejected" && enRes.status === "rejected") {
+      throw zhRes.reason instanceof Error
+        ? zhRes.reason
+        : new Error("有道语音识别失败");
+    }
+    throw new Error("没有识别到有效语音，请重试");
+  }
+
+  async recognizeOnce(qBase64, langType) {
+    const data = await this.postForm("https://openapi.youdao.com/asrapi", {
+      q: qBase64,
+      langType,
+      format: "wav",
+      rate: "16000",
+      channel: "1",
+      type: "1",
+    });
+    if (String(data.errorCode) !== "0") {
+      throw new Error(youdaoErrorMessage("ASR", data.errorCode));
+    }
+    const result = data.result;
+    if (Array.isArray(result)) return result.join("").trim();
+    return String(result || "").trim();
+  }
+
+  async postForm(url, extra) {
+    const salt = randomUUID();
+    const curtime = String(Math.floor(Date.now() / 1000));
+    const q = String(extra.q ?? "");
+    const sign = sha256Hex(
+      this.appKey + truncateForSign(q) + salt + curtime + this.appSecret,
+    );
+    const body = new URLSearchParams({
+      ...extra,
+      appKey: this.appKey,
+      salt,
+      curtime,
+      sign,
+      signType: "v3",
+    });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`有道接口失败 (${res.status}): ${detail.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+}
+
+function truncateForSign(q) {
+  const s = String(q);
+  if (s.length <= 20) return s;
+  return `${s.slice(0, 10)}${s.length}${s.slice(-10)}`;
+}
+
+/** Prefer the transcript whose script matches the ASR language hypothesis. */
+export function pickAsrTranscript(zhText, enText) {
+  const zh = String(zhText || "").trim();
+  const en = String(enText || "").trim();
+  if (!zh && !en) return "";
+  if (zh && !en) return zh;
+  if (en && !zh) return en;
+
+  const zhCjk = (zh.match(/[\u4e00-\u9fff]/g) || []).length;
+  const enCjk = (en.match(/[\u4e00-\u9fff]/g) || []).length;
+  const zhLatin = (zh.match(/[A-Za-z]/g) || []).length;
+  const enLatin = (en.match(/[A-Za-z]/g) || []).length;
+
+  // Mandarin ASR returned real Chinese → trust it over romanization.
+  if (zhCjk >= 2 && zhCjk >= zhLatin) return zh;
+  // English ASR returned Latin-heavy text while Mandarin ASR did not.
+  if (enLatin >= 3 && enCjk === 0 && zhCjk < 2) return en;
+
+  const zhScore = zhCjk * 4 - zhLatin + Math.min(zh.length, 24) * 0.05;
+  const enScore = enLatin * 4 - enCjk * 2 + Math.min(en.length, 24) * 0.05;
+  return zhScore >= enScore ? zh : en;
+}
+
+function youdaoErrorMessage(kind, code) {
+  const c = String(code);
+  if (c === "110") {
+    return kind === "ASR"
+      ? "有道应用未绑定「短语音识别」服务：请在 ai.youdao.com 控制台创建短语音识别实例并绑定到当前应用"
+      : "有道应用未绑定「文本翻译」服务：请在控制台创建实例并绑定应用";
+  }
+  if (c === "401") return "有道账户欠费或停用，请到控制台检查余额";
+  if (c === "411" || c === "412") return "有道接口访问过频，请稍后再试";
+  return `有道${kind === "ASR" ? "语音识别" : "翻译"}失败 (errorCode=${c})`;
+}
+
+function sha256Hex(input) {
+  return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
 class MyMemoryProvider {

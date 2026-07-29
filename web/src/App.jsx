@@ -54,6 +54,9 @@ export default function App() {
   const [autoSpeak, setAutoSpeak] = useState(true);
 
   const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaChunksRef = useRef([]);
+  const mediaStreamRef = useRef(null);
   const listRef = useRef(null);
   const finalTranscriptRef = useRef("");
   const inputRef = useRef(null);
@@ -68,6 +71,38 @@ export default function App() {
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
     [],
   );
+  const cloudAsr = Boolean(health?.cloudAsr);
+  const canRecord = cloudAsr || speechSupported;
+  const providers = Array.isArray(health?.providers) ? health.providers : [];
+
+  const switchProvider = async (id) => {
+    if (!id || busy || recording || id === health?.provider) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(apiUrl("api/provider"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "切换失败");
+      setHealth((prev) => ({
+        ...(prev || {}),
+        ...data,
+        providers: data.providers || prev?.providers,
+      }));
+      setStatus(
+        data.cloudAsr
+          ? "已切换云端方案：点说话上传识别"
+          : "已切换本地方案：浏览器识别 + 免密翻译",
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "切换失败");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     const { pathname, search, hash } = window.location;
@@ -80,7 +115,7 @@ export default function App() {
     fetch(apiUrl("api/health"))
       .then((r) => r.json())
       .then(setHealth)
-      .catch(() => setHealth({ ok: false, provider: "googlegtx", browserSpeech: true }));
+      .catch(() => setHealth({ ok: false, provider: "googlegtx", browserSpeech: true, cloudAsr: false }));
     window.speechSynthesis?.addEventListener?.("voiceschanged", () => {});
   }, []);
 
@@ -94,6 +129,12 @@ export default function App() {
   useEffect(
     () => () => {
       recognitionRef.current?.abort?.();
+      try {
+        mediaRecorderRef.current?.stop?.();
+      } catch {
+        /* ignore */
+      }
+      mediaStreamRef.current?.getTracks?.().forEach((t) => t.stop());
       window.speechSynthesis?.cancel?.();
     },
     [],
@@ -146,6 +187,124 @@ export default function App() {
     if (!text || busy || recording) return;
     setDraft("");
     await translateText(text);
+  };
+
+  const submitCloudAudio = async (blob) => {
+    setBusy(true);
+    setError("");
+    setStatus("上传录音…");
+    const statusTimer = window.setTimeout(() => setStatus("云端识别中…"), 400);
+    const statusTimer2 = window.setTimeout(() => setStatus("翻译中…"), 1600);
+    try {
+      const form = new FormData();
+      const ext = blob.type.includes("mp4")
+        ? "m4a"
+        : blob.type.includes("wav")
+          ? "wav"
+          : "webm";
+      form.append("audio", blob, `speech.${ext}`);
+      const res = await fetch(apiUrl("api/turn"), {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "语音翻译失败");
+      await appendTurn({ id: crypto.randomUUID(), ...data });
+      const totalMs = data?.timings?.totalMs;
+      setStatus(
+        totalMs
+          ? `完成（约 ${(totalMs / 1000).toFixed(1)}s）· 继续说下一句`
+          : "继续说下一句（云端识别 + 自动互译）",
+      );
+      inputRef.current?.focus();
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "网络或服务异常");
+      setStatus("自动识别中/英，互译给对方");
+    } finally {
+      window.clearTimeout(statusTimer);
+      window.clearTimeout(statusTimer2);
+      setBusy(false);
+    }
+  };
+
+  const startCloudListen = async () => {
+    setError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("当前浏览器不支持麦克风录音，请打字");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      mediaChunksRef.current = [];
+      const mimeCandidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+        "",
+      ];
+      let recorder = null;
+      for (const mime of mimeCandidates) {
+        try {
+          recorder = mime
+            ? new MediaRecorder(stream, { mimeType: mime })
+            : new MediaRecorder(stream);
+          break;
+        } catch {
+          /* try next */
+        }
+      }
+      if (!recorder) {
+        stream.getTracks().forEach((t) => t.stop());
+        setError("无法启动录音");
+        return;
+      }
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size) mediaChunksRef.current.push(event.data);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start(250);
+      setRecording(true);
+      setStatus("正在听…说完再点一次（云端识别）");
+    } catch (err) {
+      console.error(err);
+      setError(
+        err instanceof Error && /Permission|NotAllowed/i.test(err.message)
+          ? "请允许麦克风权限后再试"
+          : "无法打开麦克风，请打字",
+      );
+    }
+  };
+
+  const stopCloudListen = async () => {
+    const recorder = mediaRecorderRef.current;
+    setRecording(false);
+    if (!recorder) {
+      mediaStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      return;
+    }
+    const blob = await new Promise((resolve) => {
+      recorder.onstop = () => {
+        const type = recorder.mimeType || "audio/webm";
+        resolve(new Blob(mediaChunksRef.current, { type }));
+      };
+      try {
+        recorder.stop();
+      } catch {
+        resolve(new Blob([], { type: "audio/webm" }));
+      }
+    });
+    mediaRecorderRef.current = null;
+    mediaStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+    mediaChunksRef.current = [];
+    if (!blob.size) {
+      setError("没有录到声音，请再说一次或改用打字");
+      setStatus("自动识别中/英，互译给对方");
+      return;
+    }
+    await submitCloudAudio(blob);
   };
 
   const startBrowserListen = () => {
@@ -210,11 +369,13 @@ export default function App() {
 
   const toggleRecord = () => {
     if (recording) {
-      void stopBrowserListen();
+      if (cloudAsr) void stopCloudListen();
+      else void stopBrowserListen();
       return;
     }
     if (busy) return;
-    startBrowserListen();
+    if (cloudAsr) void startCloudListen();
+    else startBrowserListen();
   };
 
   const correctDirection = async (turn) => {
@@ -251,12 +412,20 @@ export default function App() {
 
   const providerLabel = !health
     ? "连接中"
-    : health.provider === "googlegtx"
-      ? "自动互译"
-      : health.provider || "就绪";
+    : health.label ||
+      (health.provider === "youdao"
+        ? "有道智云"
+        : health.provider === "local" || health.provider === "googlegtx"
+          ? "本地最快"
+          : health.provider || "就绪");
 
   const phase = recording ? "listening" : busy ? "working" : "idle";
   const latest = turns[turns.length - 1] || null;
+  const micHint = cloudAsr
+    ? "点麦克风说话：云端识别 + 自动互译；也可打字"
+    : isIOS || !speechSupported
+      ? "本地方案：iPhone 请打字（网页语音识别弱）；Android 可说话"
+      : "本地方案：可打字或点麦克风（浏览器识别）";
 
   return (
     <div className={`shell phase-${phase}`}>
@@ -280,8 +449,25 @@ export default function App() {
         </div>
       </header>
 
+      {providers.length ? (
+        <div className="provider-row" aria-label="翻译方案">
+          {providers.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className={`provider-chip ${p.active ? "active" : ""} ${p.ready ? "" : "disabled"}`}
+              disabled={!p.ready || busy || recording}
+              title={p.hint || p.label}
+              onClick={() => void switchProvider(p.id)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <p className="lede">
-        参考 Google / 有道对话模式：说中文或英文均可，自动译成另一边。同侧阅读，左中文右英文。
+        可切换：本地最快 / 有道 / 讯飞。同侧阅读，左中文右英文。
       </p>
 
       <main className="transcript" ref={listRef}>
@@ -343,11 +529,7 @@ export default function App() {
       ) : null}
 
       <footer className="dock">
-        <p className="hint">
-          {isIOS || !speechSupported
-            ? "iPhone：直接打字发送，自动中英互译"
-            : "Android Chrome：可打字或点麦克风，自动互译"}
-        </p>
+        <p className="hint">{micHint}</p>
         <div className="compose">
           <input
             ref={inputRef}
@@ -365,7 +547,7 @@ export default function App() {
           <button type="button" className="send" disabled={busy || recording || !draft.trim()} onClick={() => void submitDraft()}>
             发送
           </button>
-          {speechSupported ? (
+          {canRecord ? (
             <button
               type="button"
               className={`mic ${recording ? "hot" : ""}`}

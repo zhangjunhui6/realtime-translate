@@ -4,30 +4,15 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createProvider } from "./provider.js";
+import { createRegistryController } from "./registry.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "../..");
 dotenv.config({ path: path.join(rootDir, ".env") });
 
-// Prefer RT_* for local/mlx. On Render/Fly, platform injects PORT.
 const port = Number(process.env.RT_PORT || process.env.PORT || 8787);
 const host = process.env.RT_HOST || "0.0.0.0";
-const hasKey = Boolean(process.env.OPENAI_API_KEY?.trim());
-const configured = (process.env.TRANSLATE_PROVIDER || "").toLowerCase();
-const providerName =
-  configured ||
-  (hasKey ? "openai" : "googlegtx");
-const provider = createProvider({
-  name: providerName === "openai" && !hasKey ? "googlegtx" : providerName,
-  apiKey: process.env.OPENAI_API_KEY,
-  baseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-});
-
-const browserSpeech =
-  provider.name === "googlegtx" ||
-  provider.name === "mymemory" ||
-  provider.name === "mock";
+const registry = createRegistryController(process.env);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -39,19 +24,40 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
+  const meta = registry.currentMeta();
   res.json({
     ok: true,
-    provider: provider.name,
-    mock: provider.name === "mock",
-    browserSpeech,
-    browserTts: browserSpeech,
-    needsOpenAIKey: provider.name === "openai",
+    ...meta,
+    providers: registry.list(),
+    mock: meta.provider === "mock",
   });
+});
+
+app.get("/api/providers", (_req, res) => {
+  res.json({ providers: registry.list(), current: registry.currentId() });
+});
+
+app.post("/api/provider", (req, res) => {
+  try {
+    const id = String(req.body?.provider || req.body?.id || "").trim();
+    if (!id) {
+      res.status(400).json({ error: "missing_provider", message: "缺少方案 id" });
+      return;
+    }
+    const active = registry.setCurrent(id);
+    res.json({ ok: true, ...registry.currentMeta(), active, providers: registry.list() });
+  } catch (err) {
+    res.status(400).json({
+      error: "provider_switch_failed",
+      message: err instanceof Error ? err.message : "切换失败",
+    });
+  }
 });
 
 /** Text-only turn — used when browser Web Speech does ASR. */
 app.post("/api/translate", async (req, res) => {
   try {
+    const provider = registry.getProvider();
     const sourceText = String(req.body?.sourceText || "").trim();
     const forceDirection = normalizeDirection(req.body?.forceDirection);
     if (!sourceText) {
@@ -59,7 +65,7 @@ app.post("/api/translate", async (req, res) => {
       return;
     }
     if (typeof provider.translateText !== "function") {
-      res.status(400).json({ error: "unsupported", message: "当前 provider 不支持文本翻译" });
+      res.status(400).json({ error: "unsupported", message: "当前方案不支持文本翻译" });
       return;
     }
     const result = await provider.translateText({ sourceText, forceDirection });
@@ -75,6 +81,7 @@ app.post("/api/translate", async (req, res) => {
 
 app.post("/api/turn", upload.single("audio"), async (req, res) => {
   try {
+    const provider = registry.getProvider();
     if (!req.file?.buffer?.length) {
       res.status(400).json({ error: "missing_audio", message: "请先录音再发送" });
       return;
@@ -98,6 +105,7 @@ app.post("/api/turn", upload.single("audio"), async (req, res) => {
 
 app.post("/api/retranslate", async (req, res) => {
   try {
+    const provider = registry.getProvider();
     const sourceText = String(req.body?.sourceText || "").trim();
     const direction = normalizeDirection(req.body?.direction);
     if (!sourceText) {
@@ -121,13 +129,15 @@ app.post("/api/retranslate", async (req, res) => {
 
 app.post("/api/tts", async (req, res) => {
   try {
-    if (browserSpeech) {
+    const meta = registry.currentMeta();
+    if (meta.browserSpeech || meta.provider === "youdao" || meta.provider === "local") {
       res.status(400).json({
         error: "use_browser_tts",
         message: "当前模式请使用系统语音播报",
       });
       return;
     }
+    const provider = registry.getProvider();
     const text = String(req.body?.text || "").trim();
     const lang = req.body?.lang === "en" ? "en" : "zh";
     if (!text) {
@@ -147,16 +157,28 @@ app.post("/api/tts", async (req, res) => {
 });
 
 const webDist = path.join(rootDir, "web/dist");
-app.use(express.static(webDist));
+app.use(
+  express.static(webDist, {
+    setHeaders(res, filePath) {
+      if (filePath.endsWith("index.html")) {
+        res.setHeader("Cache-Control", "no-store");
+      }
+    },
+  }),
+);
 app.get(/^(?!\/api).*/, (req, res, next) => {
   if (req.method !== "GET") return next();
+  res.setHeader("Cache-Control", "no-store");
   res.sendFile(path.join(webDist, "index.html"), (err) => {
     if (err) next();
   });
 });
 
 app.listen(port, host, () => {
-  console.log(`realtime-translate server on http://${host}:${port} (provider=${provider.name})`);
+  const meta = registry.currentMeta();
+  console.log(
+    `realtime-translate server on http://${host}:${port} (provider=${meta.provider})`,
+  );
 });
 
 function normalizeDirection(value) {
