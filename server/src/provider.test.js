@@ -18,6 +18,11 @@ test("mock translateText respects forceDirection", async () => {
   assert.match(result.translatedText, /EN/);
 });
 
+test("googlegtx provider is constructible", () => {
+  const provider = createProvider({ name: "googlegtx" });
+  assert.equal(provider.name, "googlegtx");
+});
+
 test("mock provider returns zh/en turn payload", async () => {
   const provider = createProvider({ name: "mock" });
   const result = await provider.transcribeAndTranslate({

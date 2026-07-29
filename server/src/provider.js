@@ -1,12 +1,14 @@
 /**
  * Translation providers:
- * - mymemory: free text MT (no key); browser does ASR/TTS
+ * - googlegtx: free unofficial Google translate endpoint (best free quality)
+ * - mymemory: free text MT fallback (quality uneven on Chinese)
  * - mock: offline stub
  * - openai: cloud ASR + MT + TTS when OPENAI_API_KEY is set
  */
 
 export function createProvider({ name, apiKey, baseUrl }) {
   if (name === "mock") return new MockProvider();
+  if (name === "googlegtx") return new GoogleGtxProvider();
   if (name === "mymemory") return new MyMemoryProvider();
   if (name === "openai") return new OpenAIProvider({ apiKey, baseUrl });
   throw new Error(`Unknown provider: ${name}`);
@@ -78,6 +80,59 @@ class MockProvider {
   async synthesize() {
     const buffer = buildSilentWav(0.4);
     return { buffer, contentType: "audio/wav" };
+  }
+}
+
+class GoogleGtxProvider {
+  name = "googlegtx";
+
+  async translateText({ sourceText, forceDirection }) {
+    const text = String(sourceText || "").trim();
+    if (!text) throw new Error("没有识别到有效文本");
+    const direction = detectDirection(text, forceDirection);
+    const sl = direction === "zh2en" ? "zh-CN" : "en";
+    const tl = direction === "zh2en" ? "en" : "zh-CN";
+    const url = new URL("https://translate.googleapis.com/translate_a/single");
+    url.searchParams.set("client", "gtx");
+    url.searchParams.set("sl", sl);
+    url.searchParams.set("tl", tl);
+    url.searchParams.set("dt", "t");
+    url.searchParams.set("q", text);
+
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 FaceTalk/0.1" },
+    });
+    if (!res.ok) {
+      throw new Error(`翻译服务失败 (${res.status})`);
+    }
+    const data = await res.json();
+    const translatedText = Array.isArray(data?.[0])
+      ? data[0].map((row) => row?.[0] || "").join("").trim()
+      : "";
+    if (!translatedText) {
+      throw new Error("翻译结果为空，请重试");
+    }
+    return {
+      sourceLang: direction === "zh2en" ? "zh" : "en",
+      targetLang: direction === "zh2en" ? "en" : "zh",
+      direction,
+      sourceText: text,
+      translatedText,
+      detected: !forceDirection,
+      provider: this.name,
+    };
+  }
+
+  async transcribeAndTranslate() {
+    throw new Error("googlegtx 模式请在浏览器里输入/语音识别，再调用 /api/translate");
+  }
+
+  async retranslate({ sourceText, direction }) {
+    return this.translateText({ sourceText, forceDirection: direction });
+  }
+
+  async synthesize() {
+    throw new Error("googlegtx 模式请使用系统语音播报");
   }
 }
 

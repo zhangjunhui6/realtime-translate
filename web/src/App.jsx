@@ -48,10 +48,10 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [status, setStatus] = useState("输入一句话，自动中英互译");
-  const [langHint, setLangHint] = useState("zh-CN");
+  const [status, setStatus] = useState("自动识别中/英，互译给对方");
   const [interim, setInterim] = useState("");
   const [draft, setDraft] = useState("");
+  const [autoSpeak, setAutoSpeak] = useState(true);
 
   const recognitionRef = useRef(null);
   const listRef = useRef(null);
@@ -80,14 +80,7 @@ export default function App() {
     fetch(apiUrl("api/health"))
       .then((r) => r.json())
       .then(setHealth)
-      .catch(() =>
-        setHealth({
-          ok: false,
-          provider: "mymemory",
-          browserSpeech: true,
-          browserTts: true,
-        }),
-      );
+      .catch(() => setHealth({ ok: false, provider: "googlegtx", browserSpeech: true }));
     window.speechSynthesis?.addEventListener?.("voiceschanged", () => {});
   }, []);
 
@@ -106,15 +99,28 @@ export default function App() {
     [],
   );
 
-  const appendTurn = useCallback((turn) => {
-    setTurns((prev) => [...prev, turn].slice(-MAX_TURNS));
-    setLangHint(turn.direction === "zh2en" ? "en-US" : "zh-CN");
+  const playTts = useCallback(async (text, lang) => {
+    try {
+      await speakBrowser(text, lang);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "播报失败");
+    }
   }, []);
+
+  const appendTurn = useCallback(
+    async (turn) => {
+      setTurns((prev) => [...prev, turn].slice(-MAX_TURNS));
+      if (autoSpeak && turn.translatedText) {
+        await playTts(turn.translatedText, turn.targetLang);
+      }
+    },
+    [autoSpeak, playTts],
+  );
 
   const translateText = async (sourceText, forceDirection = null) => {
     setBusy(true);
     setError("");
-    setStatus("正在翻译…");
+    setStatus("自动互译中…");
     try {
       const res = await fetch(apiUrl("api/translate"), {
         method: "POST",
@@ -123,13 +129,13 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "翻译失败");
-      appendTurn({ id: crypto.randomUUID(), ...data });
-      setStatus("继续输入下一句");
+      await appendTurn({ id: crypto.randomUUID(), ...data });
+      setStatus("继续说下一句（自动中英互译）");
       inputRef.current?.focus();
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : "网络或服务异常");
-      setStatus("输入一句话，自动中英互译");
+      setStatus("自动识别中/英，互译给对方");
     } finally {
       setBusy(false);
     }
@@ -145,7 +151,7 @@ export default function App() {
   const startBrowserListen = () => {
     setError("");
     if (!speechSupported) {
-      setError("当前浏览器不支持语音识别，请打字");
+      setError("当前浏览器不支持语音识别，请打字（iPhone 请打字）");
       return;
     }
     const recognition = getSpeechRecognition();
@@ -155,7 +161,8 @@ export default function App() {
     }
     finalTranscriptRef.current = "";
     setInterim("");
-    recognition.lang = langHint;
+    // Auto mode: let the engine try Chinese first; detection still happens on text.
+    recognition.lang = "zh-CN";
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.onresult = (event) => {
@@ -176,7 +183,7 @@ export default function App() {
     recognitionRef.current = recognition;
     recognition.start();
     setRecording(true);
-    setStatus("正在听…说完再点一次");
+    setStatus("正在听…说完再点一次（自动判中/英）");
   };
 
   const stopBrowserListen = async () => {
@@ -195,7 +202,7 @@ export default function App() {
     finalTranscriptRef.current = "";
     if (!text) {
       setError("没有听清，请再说一次或改用打字");
-      setStatus("输入一句话，自动中英互译");
+      setStatus("自动识别中/英，互译给对方");
       return;
     }
     await translateText(text);
@@ -225,7 +232,9 @@ export default function App() {
       setTurns((prev) =>
         prev.map((t) => (t.id === turn.id ? { ...t, ...data, id: t.id } : t)),
       );
-      setLangHint(direction === "zh2en" ? "en-US" : "zh-CN");
+      if (autoSpeak && data.translatedText) {
+        await playTts(data.translatedText, data.targetLang);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "重译失败");
     } finally {
@@ -233,25 +242,18 @@ export default function App() {
     }
   };
 
-  const playTts = async (text, lang) => {
-    setError("");
-    try {
-      await speakBrowser(text, lang);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "播报失败");
-    }
-  };
-
   const clearHistory = () => {
     if (busy || recording) return;
     setTurns([]);
     setError("");
-    setLangHint("zh-CN");
-    setStatus("输入一句话，自动中英互译");
+    setStatus("自动识别中/英，互译给对方");
   };
 
-  const providerLabel =
-    !health ? "连接中" : health.provider === "mymemory" ? "免密钥" : health.provider || "就绪";
+  const providerLabel = !health
+    ? "连接中"
+    : health.provider === "googlegtx"
+      ? "自动互译"
+      : health.provider || "就绪";
 
   const phase = recording ? "listening" : busy ? "working" : "idle";
   const latest = turns[turns.length - 1] || null;
@@ -260,116 +262,98 @@ export default function App() {
     <div className={`shell phase-${phase}`}>
       <div className="atmosphere" aria-hidden="true" />
 
-      <header className="brand-bar">
-        <div className="brand-mark">
-          <span className="brand-name">对面</span>
-          <span className="brand-en">FaceTalk</span>
+      <header className="top">
+        <div className="pair-switch" aria-label="语言对">
+          <span className="lang">中文</span>
+          <span className="auto-badge">AUTO</span>
+          <span className="lang en">English</span>
         </div>
-        <div className="brand-meta">
+        <div className="top-right">
           <span className="pill">{providerLabel}</span>
-          <span className="pill soft">{turns.length} 轮</span>
+          <button
+            type="button"
+            className={`pill toggle ${autoSpeak ? "on" : ""}`}
+            onClick={() => setAutoSpeak((v) => !v)}
+          >
+            {autoSpeak ? "自动播报开" : "自动播报关"}
+          </button>
         </div>
       </header>
 
-      <p className="tagline">面对面说话，同侧阅读 · 左中文，右英文</p>
+      <p className="lede">
+        参考 Google / 有道对话模式：说中文或英文均可，自动译成另一边。同侧阅读，左中文右英文。
+      </p>
 
-      <div className="lane-heads" aria-hidden="true">
-        <div className="lane-head zh">中文</div>
-        <div className="lane-head en">English</div>
-      </div>
-
-      <main className="stream" ref={listRef}>
+      <main className="transcript" ref={listRef}>
         {!turns.length ? (
-          <div className="empty-state">
-            <p className="empty-title">开始第一句</p>
-            <p className="empty-copy">
-              两个人看着同一块屏幕。你说中文，对面看右边英文；对方说英文，你看左边中文。
-            </p>
-            <ol className="empty-steps">
-              <li>底部输入中文或英文</li>
-              <li>自动识别方向并翻译</li>
-              <li>点播报朗读给对方听</li>
-            </ol>
+          <div className="empty">
+            <h1>开始自动对话</h1>
+            <p>像 Google 翻译对话一样：一人一句，系统自动判语种并互译。</p>
+            <ul>
+              <li>输入或说话（iPhone 请打字）</li>
+              <li>自动中 ↔ 英</li>
+              <li>译文可自动朗读</li>
+            </ul>
           </div>
         ) : (
           turns.map((turn, index) => {
             const { zh, en, spoken } = bilingualPair(turn);
             const isLatest = index === turns.length - 1;
             return (
-              <section
-                key={turn.id}
-                className={`exchange ${isLatest ? "is-latest" : ""}`}
-                data-spoken={spoken}
-              >
-                <div className="exchange-index">#{index + 1}</div>
-                <div className="pair">
-                  <article className={`panel zh ${spoken === "zh" ? "is-source" : "is-target"}`}>
-                    <header>
-                      <span>中文</span>
-                      <span className="role">{spoken === "zh" ? "原文" : "译文"}</span>
-                    </header>
+              <article key={turn.id} className={`card ${isLatest ? "latest" : ""}`}>
+                <div className="card-meta">
+                  <span>#{index + 1}</span>
+                  <span>{spoken === "zh" ? "中文原文 → 英文" : "English → 中文"}</span>
+                </div>
+                <div className="duo">
+                  <div className={`bubble zh ${spoken === "zh" ? "source" : ""}`}>
+                    <span className="label">中文</span>
                     <p>{zh || "—"}</p>
                     {zh ? (
-                      <button type="button" className="ghost-btn" disabled={busy} onClick={() => playTts(zh, "zh")}>
+                      <button type="button" disabled={busy} onClick={() => playTts(zh, "zh")}>
                         播报
                       </button>
                     ) : null}
-                  </article>
-                  <article className={`panel en ${spoken === "en" ? "is-source" : "is-target"}`}>
-                    <header>
-                      <span>English</span>
-                      <span className="role">{spoken === "en" ? "Source" : "Translation"}</span>
-                    </header>
+                  </div>
+                  <div className={`bubble en ${spoken === "en" ? "source" : ""}`}>
+                    <span className="label">English</span>
                     <p>{en || "—"}</p>
                     {en ? (
-                      <button type="button" className="ghost-btn" disabled={busy} onClick={() => playTts(en, "en")}>
+                      <button type="button" disabled={busy} onClick={() => playTts(en, "en")}>
                         Speak
                       </button>
                     ) : null}
-                  </article>
+                  </div>
                 </div>
-              </section>
+              </article>
             );
           })
         )}
       </main>
 
       {latest ? (
-        <div className="utility-row">
-          <button type="button" className="text-btn" disabled={busy} onClick={() => correctDirection(latest)}>
-            纠正方向 · {latest.direction === "zh2en" ? "中→英" : "英→中"}
+        <div className="tools">
+          <button type="button" disabled={busy} onClick={() => correctDirection(latest)}>
+            翻反了？纠正方向
           </button>
-          {latest.detected ? <span className="hint-ok">已自动检测</span> : null}
-          <button type="button" className="text-btn muted" disabled={busy || recording} onClick={clearHistory}>
-            清空
+          <button type="button" className="ghost" disabled={busy || recording} onClick={clearHistory}>
+            清空对话
           </button>
         </div>
       ) : null}
 
       <footer className="dock">
-        {isIOS || !speechSupported ? (
-          <p className="dock-tip">iPhone 请直接打字；点播报可用系统朗读</p>
-        ) : (
-          <p className="dock-tip">可打字，或点右侧麦克风说话</p>
-        )}
-
-        <div className="dock-row">
-          <button
-            type="button"
-            className="pref"
-            disabled={recording || busy}
-            onClick={() => setLangHint((h) => (h === "zh-CN" ? "en-US" : "zh-CN"))}
-            title="语音识别偏好"
-          >
-            {langHint === "zh-CN" ? "中" : "EN"}
-          </button>
-
+        <p className="hint">
+          {isIOS || !speechSupported
+            ? "iPhone：直接打字发送，自动中英互译"
+            : "Android Chrome：可打字或点麦克风，自动互译"}
+        </p>
+        <div className="compose">
           <input
             ref={inputRef}
-            type="text"
             value={draft}
-            placeholder={langHint === "zh-CN" ? "说点什么…" : "Say something…"}
             disabled={busy || recording}
+            placeholder="中文或英文都可以…"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -378,32 +362,23 @@ export default function App() {
               }
             }}
           />
-
-          <button
-            type="button"
-            className="send"
-            disabled={busy || recording || !draft.trim()}
-            onClick={() => void submitDraft()}
-          >
+          <button type="button" className="send" disabled={busy || recording || !draft.trim()} onClick={() => void submitDraft()}>
             发送
           </button>
-
           {speechSupported ? (
             <button
               type="button"
               className={`mic ${recording ? "hot" : ""}`}
-              onClick={toggleRecord}
               disabled={busy && !recording}
-              aria-label={recording ? "结束录音" : "开始说话"}
+              onClick={toggleRecord}
             >
-              {recording ? "停" : "麦"}
+              {recording ? "结束" : "说话"}
             </button>
           ) : null}
         </div>
-
-        <p className="dock-status">{status}</p>
-        {interim ? <p className="dock-interim">{interim}</p> : null}
-        {error ? <p className="dock-error">{error}</p> : null}
+        <p className="status">{status}</p>
+        {interim ? <p className="interim">{interim}</p> : null}
+        {error ? <p className="error">{error}</p> : null}
       </footer>
     </div>
   );

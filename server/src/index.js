@@ -17,14 +17,17 @@ const hasKey = Boolean(process.env.OPENAI_API_KEY?.trim());
 const configured = (process.env.TRANSLATE_PROVIDER || "").toLowerCase();
 const providerName =
   configured ||
-  (hasKey ? "openai" : "mymemory");
+  (hasKey ? "openai" : "googlegtx");
 const provider = createProvider({
-  name: providerName === "openai" && !hasKey ? "mymemory" : providerName,
+  name: providerName === "openai" && !hasKey ? "googlegtx" : providerName,
   apiKey: process.env.OPENAI_API_KEY,
   baseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
 });
 
-const browserSpeech = provider.name === "mymemory" || provider.name === "mock";
+const browserSpeech =
+  provider.name === "googlegtx" ||
+  provider.name === "mymemory" ||
+  provider.name === "mock";
 
 const upload = multer({
   storage: multer.memoryStorage(),
