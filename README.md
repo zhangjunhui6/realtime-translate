@@ -35,7 +35,7 @@ npm run dev
 
 | 变量 | 说明 |
 |------|------|
-| `TRANSLATE_PROVIDER` | `mymemory`（默认免密）/ `openai` / `mock` |
+| `TRANSLATE_PROVIDER` | `googlegtx`（默认免密）/ `mymemory` / `openai` / `mock` |
 | `OPENAI_API_KEY` | 仅 openai 模式需要 |
 | `RT_PORT` | 本地/mlx 端口；云上可省略，用平台 `PORT` |
 | `RT_HOST` | 监听地址，云上用 `0.0.0.0` |
@@ -45,5 +45,5 @@ npm run dev
 
 - [ ] 手机 Chrome：两人轮流中英对话，译文可读
 - [ ] 手动播报可用；方向错了可纠正
-- [ ] 无 OpenAI key 也能跑（mymemory）
+- [ ] 无 OpenAI key 也能跑（googlegtx）
 - [ ] 无麦权限 / 网络失败有提示
