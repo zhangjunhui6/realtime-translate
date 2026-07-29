@@ -1,10 +1,10 @@
 {
-  "name": "Realtime Translate",
-  "short_name": "Translate",
-  "start_url": "/",
+  "name": "对面 FaceTalk",
+  "short_name": "对面",
+  "start_url": "./",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#0f172a",
+  "background_color": "#102018",
+  "theme_color": "#102018",
   "lang": "zh-CN",
   "icons": []
 }
