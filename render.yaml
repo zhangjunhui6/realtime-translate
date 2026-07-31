@@ -1,14 +1,19 @@
 services:
   - type: web
     name: realtime-translate
-    runtime: docker
+    runtime: node
     plan: free
     region: singapore
+    buildCommand: npm ci && npm run build -w web
+    startCommand: node server/src/index.js
     healthCheckPath: /api/health
     envVars:
+      - key: NODE_VERSION
+        value: "22"
       - key: RT_HOST
         value: 0.0.0.0
-      # Default: local free MT. Set YOUDAO_* secrets in Render dashboard to enable 有道.
+      # Free tier: local = browser speech + free MT (no ffmpeg).
+      # For 有道/讯飞 cloud ASR (needs ffmpeg), use paid Docker or keep text input.
       - key: TRANSLATE_PROVIDER
         value: local
       - key: YOUDAO_APP_KEY
