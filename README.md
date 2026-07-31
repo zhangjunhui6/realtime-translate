@@ -28,15 +28,32 @@ npm start
 
 ## 免费云部署（Render）
 
-已提供 `Dockerfile`（含 ffmpeg）与 `render.yaml`。
+仓库已含 `render.yaml`（**免费 Node 运行时**，不依赖 Docker）。
 
-1. 推送到 GitHub
-2. [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint** → 选仓库
-3. 在 Environment 填密钥（不要提交进 Git）：
-   - `YOUDAO_APP_KEY` / `YOUDAO_APP_SECRET`
-   - `XUNFEI_APP_ID` / `XUNFEI_API_KEY` / `XUNFEI_API_SECRET`
-   - `VOLC_ARK_API_KEY` / `VOLC_ARK_MODEL`
-   - 可选 `TRANSLATE_PROVIDER=xunfei`（或 `local` / `youdao`）
-4. 部署完成后打开 `https://xxx.onrender.com`
+> 注意：Render **免费档通常不能部署 Docker Web Service**。若 Blueprint 报 `deploy failed` 且 runtime 是 Docker，请改用下面 Node 方式，或点 Manual sync 拉取最新 `render.yaml`。
 
-注意：Render 免费档闲置会休眠，冷启动约 30–60 秒。
+### 推荐：New → Web Service（Node）
+
+1. 打开 [Render Dashboard](https://dashboard.render.com) → **New** → **Web Service**
+2. 连接 GitHub 仓库 `zhangjunhui6/realtime-translate`，Branch：`master`
+3. Runtime：**Node**
+4. Build Command：`npm ci && npm run build -w web`
+5. Start Command：`node server/src/index.js`
+6. Instance：**Free**；Health Check Path：`/api/health`
+7. Environment：
+   - `RT_HOST=0.0.0.0`
+   - `TRANSLATE_PROVIDER=local`（先免密钥跑通）
+   - 需要有道/讯飞时再填对应密钥（**不要**提交进 Git）
+8. Create Web Service → 得到 `https://xxx.onrender.com`
+
+### 或：Blueprint
+
+1. **New** → **Blueprint** → 选本仓库
+2. Blueprint Name：任意（如 `realtime-translate`）
+3. Blueprint Path：`render.yaml`；Branch：`master`
+4. 若曾失败：先删掉失败服务，再 Manual sync / 重建
+
+免费 Node 环境一般**没有 ffmpeg**：云端录音 ASR（有道/讯飞）可能不可用；打字翻译与本地方案可用。完整云端 ASR 需付费 Docker（仓库仍保留 `Dockerfile`）。
+
+注意：免费档闲置会休眠，冷启动约 30–60 秒。
+
